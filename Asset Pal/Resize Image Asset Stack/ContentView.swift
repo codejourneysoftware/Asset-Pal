@@ -21,7 +21,7 @@ struct ContentView: View {
                         .foregroundColor(.green)
                         .font(.title)
                     
-                    Text("ASSET PAL // MAINFRAME V1.0")
+                    Text("RESIZE IMAGE ASSET STACK // MAINFRAME V1.0")
                         .font(.system(.title2, design: .monospaced))
                         .fontWeight(.bold)
                         .foregroundColor(.green)
