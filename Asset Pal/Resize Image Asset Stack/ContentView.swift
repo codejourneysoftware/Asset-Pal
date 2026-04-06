@@ -34,25 +34,45 @@ struct ContentView: View {
                             .colorMultiply(.green)
                             .padding(.trailing, 8)
                     } else {
-                        Button(action: {
-                            // Prevent animations from looking unnatural during raw log resets
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) {
-                                imageProcessor.clearLogs()
+                        HStack(spacing: 8) {
+                            if imageProcessor.isOutputDirectoryValid {
+                                Button(action: {
+                                    imageProcessor.openLastOutputDirectory()
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "folder.fill")
+                                        Text("[ OPEN EXPORT ]")
+                                    }
+                                    .font(.system(.callout, design: .monospaced).weight(.bold))
+                                    .foregroundColor(.black)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Color.green)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "trash.fill")
-                                Text("[ PURGE ]")
+                            
+                            Button(action: {
+                                // Prevent animations from looking unnatural during raw log resets
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    imageProcessor.clearLogs()
+                                }
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "trash.fill")
+                                    Text("[ PURGE ]")
+                                }
+                                .font(.system(.callout, design: .monospaced).weight(.bold))
+                                .foregroundColor(.black)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.green)
                             }
-                            .font(.system(.callout, design: .monospaced).weight(.bold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.green)
+                            .buttonStyle(PlainButtonStyle())
                         }
-                        .buttonStyle(PlainButtonStyle())
                     }
                 }
                 .padding()

@@ -18,6 +18,12 @@ class ImageProcessor: ObservableObject {
         "> MAINFRAME ONLINE.",
         "> AWAITING ASSET DROP..."
     ]
+    @Published var lastOutputDirectory: URL? = nil
+    
+    var isOutputDirectoryValid: Bool {
+        guard let url = lastOutputDirectory else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
     
     func appendLog(_ message: String) {
         DispatchQueue.main.async {
@@ -35,6 +41,12 @@ class ImageProcessor: ObservableObject {
         }
     }
     
+    func openLastOutputDirectory() {
+        if let url = lastOutputDirectory {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     let context = CIContext(options: nil)
 
     func processURLs(_ urls: [URL]) {
@@ -90,6 +102,7 @@ class ImageProcessor: ObservableObject {
                 
                 panel.begin { response in
                     if response == .OK, let outputURL = panel.url {
+                        self.lastOutputDirectory = outputURL
                         self.appendLog("DIRECTORY AQUIRED: \(outputURL.lastPathComponent)")
                         self.startProcessing(imageFiles: imageFiles, outputDir: outputURL)
                     } else {
@@ -163,10 +176,9 @@ class ImageProcessor: ObservableObject {
     
     private func processAndResize(image: NSImage, target: AppStoreSize) -> NSImage? {
         let targetDimensions = target.size
-        
         let outputRect = CGRect(origin: .zero, size: targetDimensions)
         
-        // Setup drawing
+        // Setup drawing (32-bit RGBA for rendering stability)
         guard let customImageRep = NSBitmapImageRep(bitmapDataPlanes: nil,
                                                     pixelsWide: Int(targetDimensions.width),
                                                     pixelsHigh: Int(targetDimensions.height),
@@ -182,39 +194,49 @@ class ImageProcessor: ObservableObject {
         guard let context = NSGraphicsContext(bitmapImageRep: customImageRep) else { return nil }
         NSGraphicsContext.current = context
         
-        // Background color padding or blur. Let's do a blur fill of the original image, followed by a dark tint to make it pop.
+        // 1. Explicitly fill the entire background with solid black first.
+        // This acts as a safety layer for any edge slivers.
+        NSColor.black.set()
+        outputRect.fill()
+        
+        // 2. Render Blurred Background
         if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             let ciImage = CIImage(cgImage: cgImage)
-            let blurFilter = CIFilter.gaussianBlur()
-            blurFilter.inputImage = ciImage
-            // Huge blur for background
-            let minDimension = min(targetDimensions.width, targetDimensions.height)
-            blurFilter.radius = Float(minDimension * 0.05) 
             
-            if let blurredCI = blurFilter.outputImage, let blurredCG = self.context.createCGImage(blurredCI, from: blurredCI.extent) {
-                let blurredNS = NSImage(cgImage: blurredCG, size: image.size)
+            // Extension: Use Affine Clamp to repeat edge pixels infinitely, preventing dark blur borders.
+            let clampFilter = CIFilter.affineClamp()
+            clampFilter.inputImage = ciImage
+            
+            if let clampedCI = clampFilter.outputImage {
+                let blurFilter = CIFilter.gaussianBlur()
+                blurFilter.inputImage = clampedCI
+                let minDimension = min(targetDimensions.width, targetDimensions.height)
+                blurFilter.radius = Float(minDimension * 0.05) 
                 
-                // Scale to fill
-                let aspectFillRatio = max(targetDimensions.width / image.size.width, targetDimensions.height / image.size.height)
-                let fillSize = CGSize(width: image.size.width * aspectFillRatio, height: image.size.height * aspectFillRatio)
-                let fillRect = CGRect(x: (targetDimensions.width - fillSize.width) / 2.0,
-                                      y: (targetDimensions.height - fillSize.height) / 2.0,
-                                      width: fillSize.width,
-                                      height: fillSize.height)
-                
-                blurredNS.draw(in: fillRect)
-                
-                // Add a black tint for contrast
-                NSColor(white: 0, alpha: 0.3).setFill()
-                outputRect.fill(using: .sourceAtop)
-            } else {
-                // Fallback to solid color
-                NSColor.darkGray.setFill()
-                outputRect.fill()
+                // Create blurred image specifically using the original extent to avoid expand-to-infinity artifacts
+                if let blurredCI = blurFilter.outputImage, 
+                   let blurredCG = self.context.createCGImage(blurredCI, from: ciImage.extent) {
+                    
+                    let blurredNS = NSImage(cgImage: blurredCG, size: image.size)
+                    
+                    // Scale to fill
+                    let aspectFillRatio = max(targetDimensions.width / image.size.width, targetDimensions.height / image.size.height)
+                    let fillSize = CGSize(width: image.size.width * aspectFillRatio, height: image.size.height * aspectFillRatio)
+                    let fillRect = CGRect(x: (targetDimensions.width - fillSize.width) / 2.0,
+                                          y: (targetDimensions.height - fillSize.height) / 2.0,
+                                          width: fillSize.width,
+                                          height: fillSize.height)
+                    
+                    blurredNS.draw(in: fillRect)
+                    
+                    // Add a subtle black tint for better content contrast
+                    NSColor(white: 0, alpha: 0.3).setFill()
+                    outputRect.fill(using: .sourceAtop)
+                }
             }
         }
         
-        // Foreground image scaled to fit
+        // 3. Render Foreground Image Scaled to Fit
         let aspectFitRatio = min(targetDimensions.width / image.size.width, targetDimensions.height / image.size.height)
         let fitSize = CGSize(width: image.size.width * aspectFitRatio, height: image.size.height * aspectFitRatio)
         let fitRect = CGRect(x: (targetDimensions.width - fitSize.width) / 2.0,
@@ -232,12 +254,41 @@ class ImageProcessor: ObservableObject {
     }
     
     private func save(image: NSImage, originalName: String, targetName: String, outputDir: URL) {
+        // Use Core Graphics to ensure the export is opaque (no alpha channel).
+        // AppKit's NSGraphicsContext can fail for opaque buffers, but Core Graphics is natively robust for this.
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { 
-            self.appendLog("ERROR: CGImage generation failed for \(targetName).")
+            self.appendLog("ERROR: Engine failed to extract raw image data for \(targetName).")
             return 
         }
         
-        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+        let width = Int(image.size.width)
+        let height = Int(image.size.height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        
+        // Create an opaque 32-bit context (noneSkipLast) which is natively supported for drawing.
+        // Cocoa's PNG writer will then treat this the same as a 24-bit RGB file upon export.
+        guard let context = CGContext(data: nil,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            self.appendLog("ERROR: Engine failed to create opaque CGContext for \(targetName).")
+            return
+        }
+        
+        // Draw into the opaque context
+        let rect = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height))
+        context.draw(cgImage, in: rect)
+        
+        guard let opaqueCGImage = context.makeImage() else {
+            self.appendLog("ERROR: Engine failed to commit opaque image for \(targetName).")
+            return
+        }
+        
+        // Convert to NSBitmapImageRep for PNG compression
+        let bitmapRep = NSBitmapImageRep(cgImage: opaqueCGImage)
         guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else { 
             self.appendLog("ERROR: PNG data compression failed for \(targetName).")
             return 
