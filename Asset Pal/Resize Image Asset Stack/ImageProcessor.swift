@@ -199,52 +199,65 @@ class ImageProcessor: ObservableObject {
         NSColor.black.set()
         outputRect.fill()
         
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        
+        // Pixel-perfect source dimensions
+        let sourceWidth = CGFloat(cgImage.width)
+        let sourceHeight = CGFloat(cgImage.height)
+        let sourceAspectRatio = sourceWidth / sourceHeight
+        let targetAspectRatio = targetDimensions.width / targetDimensions.height
+        
         // 2. Render Blurred Background
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            let ciImage = CIImage(cgImage: cgImage)
+        let ciImage = CIImage(cgImage: cgImage)
+        
+        // Extension: Use Affine Clamp to repeat edge pixels infinitely, preventing dark blur borders.
+        let clampFilter = CIFilter.affineClamp()
+        clampFilter.inputImage = ciImage
+        
+        if let clampedCI = clampFilter.outputImage {
+            let blurFilter = CIFilter.gaussianBlur()
+            blurFilter.inputImage = clampedCI
+            let minDimension = min(targetDimensions.width, targetDimensions.height)
+            blurFilter.radius = Float(minDimension * 0.05) 
             
-            // Extension: Use Affine Clamp to repeat edge pixels infinitely, preventing dark blur borders.
-            let clampFilter = CIFilter.affineClamp()
-            clampFilter.inputImage = ciImage
-            
-            if let clampedCI = clampFilter.outputImage {
-                let blurFilter = CIFilter.gaussianBlur()
-                blurFilter.inputImage = clampedCI
-                let minDimension = min(targetDimensions.width, targetDimensions.height)
-                blurFilter.radius = Float(minDimension * 0.05) 
+            // Create blurred image specifically using the original extent to avoid expand-to-infinity artifacts
+            if let blurredCI = blurFilter.outputImage, 
+               let blurredCG = self.context.createCGImage(blurredCI, from: ciImage.extent) {
                 
-                // Create blurred image specifically using the original extent to avoid expand-to-infinity artifacts
-                if let blurredCI = blurFilter.outputImage, 
-                   let blurredCG = self.context.createCGImage(blurredCI, from: ciImage.extent) {
-                    
-                    let blurredNS = NSImage(cgImage: blurredCG, size: image.size)
-                    
-                    // Scale to fill
-                    let aspectFillRatio = max(targetDimensions.width / image.size.width, targetDimensions.height / image.size.height)
-                    let fillSize = CGSize(width: image.size.width * aspectFillRatio, height: image.size.height * aspectFillRatio)
-                    let fillRect = CGRect(x: (targetDimensions.width - fillSize.width) / 2.0,
-                                          y: (targetDimensions.height - fillSize.height) / 2.0,
-                                          width: fillSize.width,
-                                          height: fillSize.height)
-                    
-                    blurredNS.draw(in: fillRect)
-                    
-                    // Add a subtle black tint for better content contrast
-                    NSColor(white: 0, alpha: 0.3).setFill()
-                    outputRect.fill(using: .sourceAtop)
-                }
+                let blurredNS = NSImage(cgImage: blurredCG, size: CGSize(width: sourceWidth, height: sourceHeight))
+                
+                // Scale to fill + 4px bleed (2px each side) to ensure no black safety layer shows through
+                let aspectFillRatio = max(targetDimensions.width / sourceWidth, targetDimensions.height / sourceHeight)
+                let fillSize = CGSize(width: sourceWidth * aspectFillRatio + 4, height: sourceHeight * aspectFillRatio + 4)
+                let fillRect = CGRect(x: (targetDimensions.width - fillSize.width) / 2.0,
+                                      y: (targetDimensions.height - fillSize.height) / 2.0,
+                                      width: fillSize.width,
+                                      height: fillSize.height)
+                
+                blurredNS.draw(in: fillRect)
+                
+                // Add a subtle black tint for better content contrast (reduced to 0.2 for smoother look)
+                NSColor(white: 0, alpha: 0.2).setFill()
+                outputRect.fill(using: .sourceAtop)
             }
         }
         
-        // 3. Render Foreground Image Scaled to Fit
-        let aspectFitRatio = min(targetDimensions.width / image.size.width, targetDimensions.height / image.size.height)
-        let fitSize = CGSize(width: image.size.width * aspectFitRatio, height: image.size.height * aspectFitRatio)
-        let fitRect = CGRect(x: (targetDimensions.width - fitSize.width) / 2.0,
-                             y: (targetDimensions.height - fitSize.height) / 2.0,
-                             width: fitSize.width,
-                             height: fitSize.height)
+        // 3. Render Foreground Image
+        // Use Smart-Fill: If aspect ratios are extremely close, use Fill instead of Fit to avoid slivers.
+        let isNearlySameAspect = abs(sourceAspectRatio - targetAspectRatio) < 0.005
+        let logicRatio = isNearlySameAspect ? 
+            max(targetDimensions.width / sourceWidth, targetDimensions.height / sourceHeight) :
+            min(targetDimensions.width / sourceWidth, targetDimensions.height / sourceHeight)
         
-        image.draw(in: fitRect)
+        let finalFitSize = CGSize(width: sourceWidth * logicRatio, height: sourceHeight * logicRatio)
+        let finalFitRect = CGRect(x: (targetDimensions.width - finalFitSize.width) / 2.0,
+                                  y: (targetDimensions.height - finalFitSize.height) / 2.0,
+                                  width: finalFitSize.width,
+                                  height: finalFitSize.height)
+        
+        // Re-extract NSImage for pixel-perfect drawing context
+        let foregroundNS = NSImage(cgImage: cgImage, size: CGSize(width: sourceWidth, height: sourceHeight))
+        foregroundNS.draw(in: finalFitRect)
         
         NSGraphicsContext.restoreGraphicsState()
         
